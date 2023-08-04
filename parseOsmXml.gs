@@ -1,11 +1,39 @@
 /**
- * Craft WKT POLYGON element from OpenStreetMap using its web API. Make sure the OpenStreetMap element is of POLYGON type.
+ * Fetch xml data from OpenStreetMap.
  * @param {Number} osmId The OSM element ID.
  */
-function osmPolygonToWkt(osmId) {
-  // Fetch xml data from osm
+function fetchOsmXmlById(osmId) {
   let url = 'https://www.openstreetmap.org/api/0.6/way/' + osmId.toString() + '/full';
   let osmXml = UrlFetchApp.fetch(url).getContentText();
+  return osmXml
+}
+
+/**
+ * Get OpenStreetMap object name.
+ * @param {Xml} osmXml The OSM file as text.
+ */
+function getOsmXmlName(osmXml) {
+  // Parse xml data from osm
+  let document = XmlService.parse(osmXml);
+  let root = document.getRootElement();
+
+  // Search for xml name
+  let tags = root.getChild('way').getChildren('tag');
+  let name;
+  tags.forEach(tag => {
+    if (tag.getAttribute('k').getValue() == 'name') {
+      name = tag.getAttribute('v').getValue();
+    }
+  })
+  return name
+}
+
+/**
+ * Craft WKT POLYGON element from OpenStreetMap using its web API. Make sure the OpenStreetMap element is of POLYGON type.
+ * @param {Xml} osmXml The OSM file as text.
+ */
+function osmPolygonToWkt(osmXml) {
+  // Parse xml data from osm
   let document = XmlService.parse(osmXml);
   let root = document.getRootElement();
   
