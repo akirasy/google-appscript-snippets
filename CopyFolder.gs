@@ -1,5 +1,8 @@
 /**
- * Please fill-in config variables here first. Then run startCopy() function.
+ * Please fill-in config variables here first.
+ * Then run prepareCopyFolder() function.
+ * After that, run startCopyFolder function.
+ * If copy process is not complete, re-run those function again. Use `triggers` every 5 minutes might help.
  */
 function userConfigVariables() {
   // Insert your folder ID here
@@ -16,75 +19,110 @@ function userConfigVariables() {
 }
 
 /**
- * Start copying folder to target.
+ * Start indexing all folders and its subfolders and writes onto spreadsheet CopyFolderLog.
+ * Run this function until all is complete first.
  */
-function startCopy() {
-  let initialTime     = new Date();
-  let userConfig      = userConfigVariables();
-  let sourceFolderId  = userConfig.sourceFolderId;
-  let sourceFolderResourceKey = userConfig.sourceFolderResourceKey;
-  let targetFolderId  = userConfig.targetFolderId;
+function prepareCopyFolder() {
+  let initialTime       = new Date();
+  let userConfig        = userConfigVariables();
+  let sourceFolderId    = userConfig.sourceFolderId;
+  let targetFolderId    = userConfig.targetFolderId;
+  let sourceResourceKey = userConfig.sourceFolderResourceKey;
 
-  let sourceFolder;
-  if (sourceFolderResourceKey == '') {
-    sourceFolder = DriveApp.getFolderById(sourceFolderId);
-  } else {
-    sourceFolder = DriveApp.getFolderByIdAndResourceKey(sourceFolderId, sourceFolderResourceKey);
-  };
+  let copyFolderLog = initializeCopyFolderProgress(targetFolderId);
+  if (copyFolderLog) {
+    // To provide initial value to CopyFolderLog bypassing `Pending' check.
+    let runCount = 1
+    Logger.log('The prepareCopyFolder() process runCount: ' + runCount + ' times.');
+    getFileContinuationToken(copyFolderLog, sourceFolderId, targetFolderId, sourceResourceKey);
+    getFolderContinuationToken(copyFolderLog, sourceFolderId, targetFolderId, sourceResourceKey);
+    beginIterateAndCreateNewFolder(copyFolderLog, initialTime);
 
-  // Implements copyFolder function below
-  let targetFolder = DriveApp.getFolderById(targetFolderId);
-  let progressSheet = initializeCopyFolderProgress(targetFolder);
-  if (progressSheet) {
-    copyFolder(sourceFolder, targetFolder, progressSheet, initialTime);
+    while (true) {
+      runCount += 1;
+      Logger.log('The prepareCopyFolder() process runCount: ' + runCount + ' times.');
+      let folderPendingList = copyFolderLog.folderContinuationToken.getDataRange().getValues().map(item => item[4]);
+      let folderIsPending = folderPendingList.includes('Pending');
+      if (folderIsPending && isEnoughTime(initialTime, 120)) {
+        getFileContinuationToken(copyFolderLog, sourceFolderId, targetFolderId, sourceResourceKey);
+        getFolderContinuationToken(copyFolderLog, sourceFolderId, targetFolderId, sourceResourceKey);
+        beginIterateAndCreateNewFolder(copyFolderLog, initialTime);
+      } else { break }
+    }
   }
 }
 
 /**
- * Load copyFolderProgress file as Spreadsheet and returns Sheet object.
- * @param {Drive.Folder} targetFolder The targetFolder as a Folder object.
+ * Start copy file from fileIteration found in CopyFolderLog.
+ * Run this function only after prepareCopyFolder() has completed indexing all files and folders.
  */
-function initializeCopyFolderProgress(targetFolder) {
+function startCopyFolder() {
+  let initialTime     = new Date();
+  let userConfig      = userConfigVariables();
+  let targetFolderId  = userConfig.targetFolderId;
+
+  let copyFolderLog = initializeCopyFolderProgress(targetFolderId);
+  if (copyFolderLog) {
+    let filePendingList = copyFolderLog.fileContinuationToken.getDataRange().getValues().map(item => item[4]);
+    let fileIsPending = filePendingList.includes('Pending');
+    if (fileIsPending && isEnoughTime(initialTime, 210)) {
+      beginIterateAndCopyFile(copyFolderLog, initialTime);
+    }
+  }
+}
+
+/**
+ * Load copyFolderProgress file as Spreadsheet and returns Sheet object inside dictionary (JSON).
+ * @param {String} targetFolderId The targetFolderId as a string value.
+ */
+function initializeCopyFolderProgress(targetFolderId) {
   Logger.log('Initializing copyFolderProgress within Spreadsheet');
   let logFileName = 'CopyFolderLog';
+  let targetFolder = DriveApp.getFolderById(targetFolderId)
 
   function createNewLogFile() {
     Logger.log('Creating new file: ' + logFileName);
     let spreadsheet = SpreadsheetApp.create(logFileName);
-    let sheet = spreadsheet.getSheets()[0];
-    sheet.deleteColumns(4, sheet.getMaxColumns()-3);
+
+    let sheetFileContinuationToken = spreadsheet.insertSheet('files');
+    sheetFileContinuationToken.appendRow(['FOLDER NAME', 'SOURCE FOLDER ID', 'TARGET FOLDER ID', 'FILE CONTINUATION TOKEN', 'ITERATION STATUS']);
+    sheetFileContinuationToken.deleteColumns(6, sheetFileContinuationToken.getMaxColumns()-5);
+
+    let sheetFolderContinuationToken = spreadsheet.insertSheet('folders');
+    sheetFolderContinuationToken.appendRow(['FOLDER NAME', 'SOURCE FOLDER ID', 'TARGET FOLDER ID', 'FILE CONTINUATION TOKEN', 'ITERATION STATUS']);
+    sheetFolderContinuationToken.deleteColumns(6, sheetFolderContinuationToken.getMaxColumns()-5);
+
+    let sheet1 = spreadsheet.getSheets()[0];
+    spreadsheet.deleteSheet(sheet1);
+
     DriveApp.getFileById(spreadsheet.getId()).moveTo(targetFolder);
-    return sheet    
+
+    let copyFolderLog = {
+      fileContinuationToken   : sheetFileContinuationToken,
+      folderContinuationToken : sheetFolderContinuationToken
+    }
+    return copyFolderLog    
   }
 
-  let sheet;
+  let copyFolderLog;
   let searchLogFile = targetFolder.getFilesByName(logFileName);
   if (searchLogFile.hasNext()) {
     let logFileId = searchLogFile.next().getId();
     if (searchLogFile.hasNext()) {
       Logger.log('-- Duplicate copyFolderLog found! Aborting process.');
-      sheet = false;
+      copyFolderLog = false;
     } else {
       Logger.log('-- Using previous ' + logFileName);
-      sheet = SpreadsheetApp.openById(logFileId).getSheets()[0];
+      let spreadsheet = SpreadsheetApp.openById(logFileId);
+      copyFolderLog = {
+        fileContinuationToken   : spreadsheet.getSheetByName('files'),
+        folderContinuationToken : spreadsheet.getSheetByName('folders')
+      }
     }
   } else {
-    sheet = createNewLogFile();
+    copyFolderLog = createNewLogFile();
   }
-
-  return sheet
-}
-
-/**
- * Write fileName and fileId to progressSheet.
- * @param {SpreadsheetApp.sheet} sheet The sheet object of CopyFolderProgress.
- * @param {String} fileName The fileName in string.
- * @param {String} sourceFileId The fileId of source file in string
- * @param {String} targetFileId The fileId of target file in string
- */
-function setCopyFolderProgress(sheet, fileName, sourceFileId, targetFileId) {
-  let newDataRange = sheet.getRange(sheet.getLastRow()+1, 1, 1, 3);
-  newDataRange.setValues([[fileName, sourceFileId, targetFileId]]);
+  return copyFolderLog
 }
 
 /**
@@ -98,63 +136,112 @@ function isEnoughTime(initialTime, processDuration) {
   let secondsLeft = 360 - (milisecondsDifference / 1000);
   // Uncomment line below for more verbose output.
   // Logger.log('**-- ' + secondsLeft + ' seconds left --**');
-  return secondsLeft > processDuration ? true : false;
+  let output = secondsLeft > processDuration;
+  if (!output) { Logger.log('The isEnoughTime() function return value is ' + output) }
+  return output
 }
 
 /**
- * This script copies the contents of folder to other folder recursively,
- * even if the destination folder is accessible and managed by other GSUITE
- * organization (if the visibility is set to PUBLIC).
- * @param {DriveApp.Folder} source The source folder.
- * @param {DriveApp.Folder} target The target folder.
- * @param {DriveApp.Sheet} progressSheet The progress CopyFolder
- * @param {Date} initialTime initial time of code execution
+ * Collect fileContinuationToken from source folder and writes onto CopyFolderLog.
+ * @param {Object} copyFolderLog The return value of initializeCopyFolderProgress() function.
+ * @param {String} sourceId The source folder ID as a String.
+ * @param {String} targetId The target folder ID as a String.
  */
-function copyFolder(source, target, progressSheet, initialTime) {
-  let progressValues = progressSheet.getRange(1, 1, progressSheet.getLastRow()+1, 3).getValues();
-  let completedId = progressValues.map(item => item[1]);  
-  let folders = source.getFolders();
-  let files = source.getFiles();
-
-  Logger.log('Starting CopyFolder process...');
-  while (files.hasNext()) {
-    if (isEnoughTime(initialTime, 25)) {
-      let file = files.next();
-      let fileId = file.getId();
-      if (!completedId.includes(fileId)) {  
-        let fileName = file.getName();
-        let copiedFile = file.makeCopy(fileName, target);
-        setCopyFolderProgress(progressSheet, fileName, fileId, copiedFile.getId());
-        Logger.log('-- Copy complete: ' + fileName);
-      }
+function getFileContinuationToken(copyFolderLog, sourceId, targetId, sourceResourceKey='') {
+  let sheetFileContinuationToken = copyFolderLog.fileContinuationToken;
+  let existingIdList = sheetFileContinuationToken.getDataRange().getValues().map(item => item[1]);
+  if (!existingIdList.includes(sourceId)) {
+    let folder;
+    if (sourceResourceKey == '') {
+      folder = DriveApp.getFolderById(sourceId);
     } else {
-      Logger.log('Not enough time. Exiting...');
-      break;
+      folder = DriveApp.getFolderByIdAndResourceKey(sourceId, sourceResourceKey);
     }
+    let folderName = folder.getName();
+    let fileIteration = folder.getFiles();
+    let continuationToken = fileIteration.getContinuationToken();
+    sheetFileContinuationToken.appendRow([folderName, sourceId, targetId, continuationToken, 'Pending']);
+    Logger.log('-- Collect File Continuation Token for folder: ' + folderName);
   }
-  while (folders.hasNext()) {
-    Logger.log('== Another subFolder found!! ==');
-    if (isEnoughTime(initialTime, 25)) {
-      let subFolder = folders.next();
-      let folderId = subFolder.getId();
-      let folderName = subFolder.getName();
+}
 
-      let targetFolder;
-      if (!completedId.includes(folderId)) {
-        Logger.log('== SubFolder name: ' + folderName + ' ==');
-        targetFolder = target.createFolder(folderName);
-        setCopyFolderProgress(progressSheet, folderName, folderId, targetFolder.getId());
-      } else {
-        Logger.log('== Resume copying SubFolder: ' + folderName + ' ==');
-        let indexOfFoundId = completedId.indexOf(folderId);
-        targetFolder = DriveApp.getFolderById(progressValues[indexOfFoundId][2]);
-      }
-
-      copyFolder(subFolder, targetFolder, progressSheet, initialTime);
-    
+/**
+ * Collect folderContinuationToken from source folder and writes onto CopyFolderLog.
+ * @param {Object} copyFolderLog The return value of initializeCopyFolderProgress() function.
+ * @param {String} sourceId The source folder ID as a String.
+ * @param {String} targetId The target folder ID as a String.
+ */
+function getFolderContinuationToken(copyFolderLog, sourceId, targetId, sourceResourceKey='') {
+  let sheetFolderContinuationToken = copyFolderLog.folderContinuationToken;
+  let existingIdList = sheetFolderContinuationToken.getDataRange().getValues().map(item => item[1]);
+  if (!existingIdList.includes(sourceId)) {
+    let folder;
+    if (sourceResourceKey == '') {
+      folder = DriveApp.getFolderById(sourceId);
     } else {
-      break;      
+      folder = DriveApp.getFolderByIdAndResourceKey(sourceId, sourceResourceKey);
     }
+    let folderName = folder.getName();
+    let folderIteration = folder.getFolders();
+    let continuationToken = folderIteration.getContinuationToken();
+    sheetFolderContinuationToken.appendRow([folderName, sourceId, targetId, continuationToken, 'Pending']);
+    Logger.log('-- Collect Folder Continuation Token for folder: ' + folderName);
   }
-  Logger.log('No more file or folder to copy. Exiting...');
+}
+
+/**
+ * Start creating subfolders into target folder by looping into folderIteration found in CopyFolderLog.
+ * @param {Object} copyFolderLog The return value of initializeCopyFolderProgress() function.
+ * @param {Date} initialTime Instance of `new Date()` from the initial execution time.
+ */
+function beginIterateAndCreateNewFolder(copyFolderLog, initialTime) {
+  let sheetFolderContinuationToken = copyFolderLog.folderContinuationToken;
+  let continuationTokenList = sheetFolderContinuationToken.getDataRange().getValues();
+  continuationTokenList.forEach((item, index) => {
+    if (item[4] == 'Pending' && isEnoughTime(initialTime, 120)) {
+      // Begin create new folder
+      let folderIteration = DriveApp.continueFolderIterator(item[3]);
+      let target = DriveApp.getFolderById(item[2]);
+      while (folderIteration.hasNext()) {
+        if (isEnoughTime(initialTime, 120)) {
+          let folder = folderIteration.next();
+          let folderName = folder.getName();
+          let newFolder = target.createFolder(folderName);
+          Logger.log('-- Creating new folder: ' + folderName);
+          getFileContinuationToken(copyFolderLog, folder.getId(), newFolder.getId());
+          getFolderContinuationToken(copyFolderLog, folder.getId(), newFolder.getId())
+        } else { break }
+      }
+      // Mark item as done
+      sheetFolderContinuationToken.getRange(index+1, 5).setValue('Done');
+    }
+  })
+}
+
+/**
+ * Start copying files by looping into fileIteration found in CopyFolderLog.
+ * @param {Object} copyFolderLog The return value of initializeCopyFolderProgress() function.
+ * @param {Date} initialTime Instance of `new Date()` from the initial execution time.
+ */
+function beginIterateAndCopyFile(copyFolderLog, initialTime) {
+  Logger.log('-- Copying file to target folder...');
+  let sheetFileContinuationToken = copyFolderLog.fileContinuationToken;
+  let continuationTokenList = sheetFileContinuationToken.getDataRange().getValues();
+  continuationTokenList.forEach((item, index) => {
+    if (item[4] == 'Pending' && isEnoughTime(initialTime, 120)) {
+      // Begin copy loop
+      let fileIteration = DriveApp.continueFileIterator(item[3]);
+      let target = DriveApp.getFolderById(item[2]);
+      while (fileIteration.hasNext()) {
+        if (isEnoughTime(initialTime, 120)) {
+          let file = fileIteration.next();
+          let fileName = file.getName();
+          file.makeCopy(fileName, target);
+          Logger.log('Copied file: ' + fileName);
+        } else { break }
+      }
+      // Mark item as done
+      sheetFileContinuationToken.getRange(index+1, 5).setValue('Done');
+    }
+  })
 }
